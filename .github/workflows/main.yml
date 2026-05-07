@@ -36,6 +36,10 @@ jobs:
             echo "PROXY_URL 未设置，跳过代理配置。"
             exit 0
           fi
+          if [ ! -f "proxy_handler.py" ]; then
+            echo "proxy_handler.py 不存在，跳过代理配置。"
+            exit 0
+          fi
 
           # 掩码完整 PROXY_URL，防止协议/IP/密码泄露
           echo "::add-mask::$PROXY_URL"
