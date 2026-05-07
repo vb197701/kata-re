@@ -1,121 +1,70 @@
-name: Renew
+name: Auto Renew
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '6 1 * * *'
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    - cron: "17 1 2-30/2 * *"
+  workflow_dispatch:
 
 permissions:
-  actions: write
   contents: write
 
 jobs:
-  run_katabump_renew:
+  renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: 📥 拉取公库代码
-        uses: actions/checkout@v4
-
-      - name: 📥 拉取私库脚本
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.PRIVATE_REPO_NAME }}
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private
+          token: ${{ secrets.REPO_TOKEN }}
+          repository: noa1188/Katabump
 
-      - name: 📂 移动脚本到工作目录
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Dependencies
         run: |
-          mv private/action_renew.js action_renew.js
-          mv private/package.json package.json
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npm install
+          npx playwright install-deps chrome
 
-      - name: 🛠️ 安装系统依赖
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y google-chrome-stable xvfb x11-utils
-
-      - name: 🟩 安装 Node.js 依赖
-        run: npm install
-
-      - name: 🌐 安装并启动 WARP
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
-            sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
-            https://pkg.cloudflareclient.com/ jammy main" | \
-            sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update -qq && sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos connect
-          echo "⏳ 等待 WARP 隧道建立..."
-          sleep 10
-          echo "✅ WARP 出口 IP:"
-          curl -s --max-time 10 -x socks5://127.0.0.1:40000 https://api.ipify.org && echo
-
-      - name: 🔀 启动 GOST 协议转换
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | \
-            grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F socks5://127.0.0.1:40000 > gost.log 2>&1 &
-          sleep 3
-          echo "✅ GOST HTTP 代理出口 IP:"
-          curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org && echo
-
-      - name: 🔍 验证代理连通性
-        run: |
-          echo "=== 直连出口 IP ==="
-          curl -s --max-time 10 https://api.ipify.org && echo
-          echo "=== 代理出口 IP ==="
-          curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org && echo
-          echo "=== 代理返回码 ==="
-          curl -v --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>&1 | head -30
-
-      - name: 🚀 运行续期脚本
+      - name: Run Renew Script
         env:
+          # 将 USERS_JSON 配置在 GitHub Repository Secrets 中
+          # 格式: [{"username": "xxx", "password": "xxx"}, ...]
           USERS_JSON: ${{ secrets.USERS_JSON }}
-          TG_BOT: ${{ secrets.TG_BOT }}
-          HTTP_PROXY: "http://127.0.0.1:8080"
-          CHROME_PATH: "/usr/bin/google-chrome"
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
-      - name: 📸 上传截图
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: screenshots-${{ github.run_number }}
           path: screenshots/
           retention-days: 7
-          if-no-files-found: ignore
 
-      - name: ⏰ KeepAlive
-        if: always()
+      - name: Keepalive
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "最后运行时间: $(date)" > time.txt
-          git add time.txt
-          if git diff --staged --quiet; then
-            echo "无变化，跳过推送。"
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          CONTENT=$(echo "$TIMESTAMP" | base64 -w 0)
+
+          SHA=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/.keepalive" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha',''))" 2>/dev/null || echo "")
+
+          if [ -n "$SHA" ]; then
+            BODY="{\"message\":\"chore: keepalive $TIMESTAMP\",\"content\":\"$CONTENT\",\"sha\":\"$SHA\"}"
           else
-            git commit -m "KeepAlive: $(date +'%Y-%m-%d %H:%M UTC')"
-            git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main --force
+            BODY="{\"message\":\"chore: keepalive $TIMESTAMP\",\"content\":\"$CONTENT\"}"
           fi
 
-      - name: 🧹 清理历史运行记录
-        if: always()
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          delete_workflow_pattern: ${{ github.workflow }}
-          retain_days: 0
-          keep_minimum_runs: 2
+          curl -s -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/.keepalive"
