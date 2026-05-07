@@ -2,7 +2,7 @@ name: Auto Renew
 
 on:
   schedule:
-    - cron: '6 0 * * *'   # UTC 0点（北京时间 8点）
+    - cron: '6 * */2 * *'   # UTC 0点（北京时间 8点）
   workflow_dispatch:
 
 permissions:
@@ -15,11 +15,9 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # ── 1. 拉取公库 ──────────────────────────────────────────────
       - name: 📥 拉取公库代码
         uses: actions/checkout@v4
 
-      # ── 2. 拉取私库脚本 ──────────────────────────────────────────
       - name: 📥 拉取私库脚本
         uses: actions/checkout@v4
         with:
@@ -33,19 +31,16 @@ jobs:
           mv private/package.json package.json
           [ -f private/proxy_handler.py ] && mv private/proxy_handler.py proxy_handler.py || true
 
-      # ── 3. 安装 Node.js ──────────────────────────────────────────
       - name: 🟩 安装 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 'lts/*'
 
-      # ── 4. 安装 Python ───────────────────────────────────────────
       - name: 🐍 安装 Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      # ── 5. 启动代理（sing-box，可选）────────────────────────────
       - name: 🌐 启动代理（sing-box）
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
@@ -79,7 +74,6 @@ jobs:
             echo "⚠️  sing-box 已启动，但连通性检测超时（可能正常）。"
           fi
 
-      # ── 6. 安装系统依赖 & Chrome ─────────────────────────────────
       - name: 🛠️ 安装系统依赖 & Chrome
         run: |
           sudo apt-get update -qq
@@ -88,11 +82,9 @@ jobs:
           sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
           echo "✅ Chrome 版本: $(google-chrome --version)"
 
-      # ── 7. 安装 Node.js 依赖 ─────────────────────────────────────
       - name: 📦 安装 Node.js 依赖
         run: npm install
 
-      # ── 8. 运行续期脚本 ──────────────────────────────────────────
       - name: 🚀 运行续期脚本
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
@@ -103,7 +95,6 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
-      # ── 9. 上传截图 ──────────────────────────────────────────────
       - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -113,7 +104,6 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 10. KeepAlive ────────────────────────────────────────────
       - name: ⏰ KeepAlive
         if: always()
         run: |
@@ -128,7 +118,6 @@ jobs:
             git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main --force
           fi
 
-      # ── 11. 清理历史运行记录 ─────────────────────────────────────
       - name: 🧹 清理历史运行记录
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
