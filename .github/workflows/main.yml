@@ -114,7 +114,7 @@ jobs:
 
       - name: 🧹 清理历史运行记录
         if: always()
-        uses: Mattraks/delete-workflow-runs@v3
+        uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
