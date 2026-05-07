@@ -15,79 +15,87 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: 📥 拉取代码
+      # ── 1. 拉取公库 ──────────────────────────────────────────────
+      - name: 📥 拉取公库代码
         uses: actions/checkout@v4
 
+      # ── 2. 拉取私库脚本 ──────────────────────────────────────────
+      - name: 📥 拉取私库脚本
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO_NAME }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: 📂 移动脚本到工作目录
+        run: |
+          mv private/action_renew.js action_renew.js
+          mv private/package.json package.json
+          [ -f private/proxy_handler.py ] && mv private/proxy_handler.py proxy_handler.py || true
+
+      # ── 3. 安装 Node.js ──────────────────────────────────────────
       - name: 🟩 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
+          node-version: '20'
 
+      # ── 4. 安装 Python ───────────────────────────────────────────
       - name: 🐍 安装 Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
+      # ── 5. 启动代理（sing-box，可选）────────────────────────────
       - name: 🌐 启动代理（sing-box）
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           if [ -z "$PROXY_URL" ]; then
-            echo "PROXY_URL 未设置，跳过代理配置。"
+            echo "PROXY_URL 未设置，跳过 sing-box 配置。"
             exit 0
           fi
-          if [ ! -f "proxy_handler.py" ]; then
-            echo "proxy_handler.py 不存在，跳过代理配置。"
-            exit 0
-          fi
-
-          # 掩码完整 PROXY_URL，防止协议/IP/密码泄露
-          echo "::add-mask::$PROXY_URL"
-
           SINGBOX_VER="1.11.0"
+          echo "正在下载 sing-box v${SINGBOX_VER}..."
           wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-          tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz" 2>/dev/null
+          tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
           mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
           chmod +x ./sing-box
-
-          # 静默生成配置（proxy_handler.py 无任何输出）
+          echo "根据 PROXY_URL 生成 sing-box 配置..."
           python proxy_handler.py
-
-          # 启动 sing-box，日志写入文件不打印到控制台
+          echo "启动 sing-box..."
           nohup ./sing-box run -c config.json > singbox.log 2>&1 &
           sleep 5
+          echo "✅ sing-box 已启动，HTTP 代理监听 127.0.0.1:8080"
+          echo "=== 代理出口 IP ==="
+          curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org && echo || echo "代理连通性检测失败"
 
-          # 获取出口 IP 并立即掩码，只打印状态
-          EXIT_IP=$(curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>/dev/null || echo "")
-          if [ -n "$EXIT_IP" ]; then
-            echo "::add-mask::$EXIT_IP"
-            echo "✅ sing-box 已启动，代理连通性正常。"
-          else
-            echo "⚠️  sing-box 已启动，但连通性检测超时（可能正常）。"
-          fi
-
+      # ── 6. 安装系统依赖 & Chrome ─────────────────────────────────
       - name: 🛠️ 安装系统依赖 & Chrome
         run: |
           sudo apt-get update -qq
+          # 安装 xvfb 和 Chrome 官方包
           sudo apt-get install -y xvfb
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
           echo "✅ Chrome 版本: $(google-chrome --version)"
 
+      # ── 7. 安装 Node.js 依赖 ─────────────────────────────────────
       - name: 📦 安装 Node.js 依赖
         run: npm install
 
+      # ── 8. 运行续期脚本 ──────────────────────────────────────────
       - name: 🚀 运行续期脚本
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
           TG_BOT: ${{ secrets.TG_BOT }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }} 
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }} 
           PROXY_URL: ${{ secrets.PROXY_URL }}
           CHROME_PATH: "/usr/bin/google-chrome"
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
+      # ── 9. 上传截图 ──────────────────────────────────────────────
       - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -97,6 +105,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # ── 10. KeepAlive ────────────────────────────────────────────
       - name: ⏰ KeepAlive
         if: always()
         run: |
@@ -111,6 +120,7 @@ jobs:
             git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main --force
           fi
 
+      # ── 11. 清理历史运行记录 ─────────────────────────────────────
       - name: 🧹 清理历史运行记录
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
