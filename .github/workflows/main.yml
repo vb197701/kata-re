@@ -69,6 +69,15 @@ jobs:
           echo "✅ GOST HTTP 代理出口 IP:"
           curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org && echo
 
+      - name: 🔍 验证代理连通性
+        run: |
+          echo "=== 直连出口 IP ==="
+          curl -s --max-time 10 https://api.ipify.org && echo
+          echo "=== 代理出口 IP ==="
+          curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org && echo
+          echo "=== 代理返回码 ==="
+          curl -v --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>&1 | head -30
+
       - name: 🚀 运行续期脚本
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
