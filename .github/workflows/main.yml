@@ -2,7 +2,7 @@ name: Katabump Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # UTC 0点（北京时间 8点）
+    - cron: '6 0 * * *'   # UTC 0点（北京时间 8点）
   workflow_dispatch:
 
 permissions:
@@ -88,6 +88,8 @@ jobs:
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
           TG_BOT: ${{ secrets.TG_BOT }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }} 
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }} 
           PROXY_URL: ${{ secrets.PROXY_URL }}
           CHROME_PATH: "/usr/bin/google-chrome"
           GITHUB_EVENT_NAME: ${{ github.event_name }}
