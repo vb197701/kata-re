@@ -2,7 +2,7 @@ name: Auto Renew
 
 on:
   schedule:
-    - cron: '11 0 * * *'   # UTC 0点（北京时间 8点）
+    - cron: '11 0 */2 * *'   # UTC 0点（北京时间 8点）
   workflow_dispatch:
 
 permissions:
