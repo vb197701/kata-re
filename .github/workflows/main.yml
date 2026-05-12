@@ -1,4 +1,4 @@
-name: Auto Run
+name: Auto Renew
 
 on:
   schedule:
@@ -280,16 +280,13 @@ jobs:
           keep_minimum_runs: 2
 
       - name: 📘 更新 README 状态
-        if: success()
+        if: steps.gate.outputs.should_run == 'true' && success()
         shell: bash
         run: |
           set -euo pipefail
 
           META_FILE="output/last_success_meta.txt"
           README_FILE="README.md"
-
-          test -f "$META_FILE"
-          test -f "$README_FILE"
 
           LAST_SUCCESS_UNIX=$(grep '^last_success_unix=' "$META_FILE" | cut -d= -f2-)
           LAST_SUCCESS_UTC=$(grep '^last_success_utc=' "$META_FILE" | cut -d= -f2-)
@@ -299,8 +296,8 @@ jobs:
 
           SHORT_SHA="${SHA:0:7}"
 
-          cat > /tmp/readme_status_block.md <<EOF
-          <!-- AUTO-RENEW-STATUS:START -->
+          cat > /tmp/auto-run-status.md <<EOF
+          <!-- AUTO-RUN-STATUS:START -->
           - Last success UTC: \`${LAST_SUCCESS_UTC}\`
           - Last success Unix: \`${LAST_SUCCESS_UNIX}\`
           - Run ID: [\`${RUN_ID}\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID})
@@ -309,22 +306,18 @@ jobs:
           <!-- AUTO-RENEW-STATUS:END -->
           EOF
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
+          awk '
+            BEGIN {in_block=0}
+            /<!-- AUTO-RUN-STATUS:START -->/ {
+              in_block=1
+              while ((getline line < "/tmp/auto-run-status.md") > 0) print line
+              next
+            }
+            /<!-- AUTO-RUN-STATUS:END -->/ {
+              in_block=0
+              next
+            }
+            !in_block {print}
+          ' "$README_FILE" > /tmp/README.md
 
-          readme = Path("README.md")
-          block = Path("/tmp/readme_status_block.md").read_text(encoding="utf-8").strip()
-          content = readme.read_text(encoding="utf-8")
-
-          pattern = re.compile(
-              r"<!-- AUTO-RENEW-STATUS:START -->.*?<!-- AUTO-RENEW-STATUS:END -->",
-              re.S,
-          )
-
-          if not pattern.search(content):
-              raise SystemExit("README.md 中没有找到 AUTO-RENEW-STATUS 标记区块")
-
-          content = pattern.sub(block, content)
-          readme.write_text(content + "\n", encoding="utf-8")
-          PY
+          mv /tmp/README.md "$README_FILE"
