@@ -1,4 +1,4 @@
-name: Auto Renew
+name: Auto Run
 
 on:
   schedule:
