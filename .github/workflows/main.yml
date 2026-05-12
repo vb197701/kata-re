@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       first_run_at:
-        description: '首次执行时间，UTC 格式，例如 2026-05-16T00:00:00Z'
+        description: '2026-05-13T00:22:00Z'
         required: false
         type: string
       force_run:
