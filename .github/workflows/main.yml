@@ -2,11 +2,11 @@ name: Auto Run
 
 on:
   schedule:
-    - cron: '11 0 * * *' # 每天 UTC 00:11 检查一次
+    - cron: '11 2 * * *' # 每天 UTC 00:11 检查一次
   workflow_dispatch:
     inputs:
       first_run_at:
-        description: '2026-05-13T00:22:00Z'
+        description: '2026-05-13T00:08:00Z'
         required: false
         type: string
       force_run:
