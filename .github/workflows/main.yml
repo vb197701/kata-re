@@ -1,0 +1,220 @@
+name: Auto Renew
+
+on:
+  schedule:
+    - cron: '11 0 * * *' # 每天 UTC 00:11 检查一次
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: auto-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 拉取公库代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: ⏱️ 判断是否距离上次成功执行已满 4 天
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STATE_FILE=".github/state/last_success_run.txt"
+          NOW_TS=$(date -u +%s)
+          FOUR_DAYS=$((4 * 24 * 60 * 60))
+
+          mkdir -p .github/state
+          mkdir -p output
+
+          if [ ! -f "$STATE_FILE" ]; then
+            echo "首次运行，允许执行。"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LAST_TS=$(tr -d '\r\n' < "$STATE_FILE")
+
+          if ! [[ "$LAST_TS" =~ ^[0-9]+$ ]]; then
+            echo "状态文件格式错误: $LAST_TS"
+            exit 1
+          fi
+
+          DIFF=$((NOW_TS - LAST_TS))
+
+          echo "last_ts=$LAST_TS" >> "$GITHUB_OUTPUT"
+          echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
+          echo "diff=$DIFF" >> "$GITHUB_OUTPUT"
+
+          if [ "$DIFF" -ge "$FOUR_DAYS" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "已满 4 天，继续执行。"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "未满 4 天，跳过执行。"
+          fi
+
+      - name: ℹ️ 输出跳过信息
+        if: steps.gate.outputs.should_run != 'true'
+        run: |
+          echo "本次仅检查，不执行续期。"
+          echo "last_ts=${{ steps.gate.outputs.last_ts }}"
+          echo "now_ts=${{ steps.gate.outputs.now_ts }}"
+          echo "diff=${{ steps.gate.outputs.diff }}"
+
+      - name: 📥 拉取私库脚本
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.PRIVATE_REPO_NAME }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: 📂 移动脚本到工作目录
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          mv private/action_renew.js action_renew.js
+          mv private/package.json package.json
+          [ -f private/package-lock.json ] && mv private/package-lock.json package-lock.json || true
+          [ -f private/proxy_handler.py ] && mv private/proxy_handler.py proxy_handler.py || true
+
+      - name: 🟩 安装 Node.js
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: 🐍 安装 Python
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 🌐 启动代理（sing-box）
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PROXY_URL:-}" ]; then
+            echo "PROXY_URL 未设置，跳过 sing-box 配置。"
+            exit 0
+          fi
+
+          echo "::add-mask::$PROXY_URL"
+
+          SINGBOX_VER="1.11.0"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
+          chmod +x ./sing-box
+
+          python proxy_handler.py > /dev/null 2>&1
+
+          nohup ./sing-box run -c config.json > singbox.log 2>&1 &
+          sleep 5
+
+          EXIT_IP=$(curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>/dev/null || echo "")
+          if [ -n "$EXIT_IP" ]; then
+            echo "::add-mask::$EXIT_IP"
+            echo "✅ sing-box 已启动，代理连通性正常。"
+          else
+            echo "⚠️ sing-box 已启动，但连通性检测超时（可能正常）。"
+          fi
+
+      - name: 🛠️ 安装系统依赖 & Chrome
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
+          echo "✅ Chrome 版本: $(google-chrome --version)"
+
+      - name: 📦 安装 Node.js 依赖
+        if: steps.gate.outputs.should_run == 'true'
+        run: npm install
+
+      - name: 🚀 运行续期脚本
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          CHROME_PATH: "/usr/bin/google-chrome"
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+      - name: 📸 上传截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 📝 写入成功执行时间
+        if: steps.gate.outputs.should_run == 'true' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOW_TS=$(date -u +%s)
+          NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          mkdir -p .github/state
+          mkdir -p output
+
+          echo "$NOW_TS" > .github/state/last_success_run.txt
+
+          {
+            echo "last_success_unix=$NOW_TS"
+            echo "last_success_utc=$NOW_ISO"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_number=${GITHUB_RUN_NUMBER}"
+            echo "sha=${GITHUB_SHA}"
+          } > output/last_success_meta.txt
+
+      - name: ⏰ 提交状态文件
+        if: steps.gate.outputs.should_run == 'true' && success()
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/state/last_success_run.txt output/last_success_meta.txt
+
+          if git diff --staged --quiet; then
+            echo "无变化，跳过推送。"
+          else
+            git commit -m "KeepAlive: update last successful run"
+            git push
+          fi
+
+      - name: 🧹 清理历史运行记录
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          delete_workflow_pattern: ${{ github.workflow }}
+          retain_days: 0
+          keep_minimum_runs: 2
