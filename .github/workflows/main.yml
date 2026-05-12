@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: '11 0 * * *' # 每天 UTC 00:11 检查一次
   workflow_dispatch:
+    inputs:
+      first_run_at:
+        description: '2026-05-13T00:21:00Z'
+        required: false
+        type: string
+      force_run:
+        description: '是否忽略 4 天限制并立即执行'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -24,9 +34,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: ⏱️ 判断是否距离上次成功执行已满 4 天
+      - name: ⏱️ 判断是否需要执行
         id: gate
         shell: bash
+        env:
+          FIRST_RUN_AT: ${{ github.event.inputs.first_run_at }}
+          FORCE_RUN: ${{ github.event.inputs.force_run }}
         run: |
           set -euo pipefail
 
@@ -37,13 +50,55 @@ jobs:
           mkdir -p .github/state
           mkdir -p output
 
-          if [ ! -f "$STATE_FILE" ]; then
-            echo "首次运行，允许执行。"
+          echo "event_name=${GITHUB_EVENT_NAME}"
+          echo "force_run=${FORCE_RUN:-false}"
+          echo "first_run_at=${FIRST_RUN_AT:-}"
+
+          # 0) 手动强制执行：直接放行
+          if [ "${FORCE_RUN:-false}" = "true" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=force_run" >> "$GITHUB_OUTPUT"
             echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
+            echo "手动强制执行，跳过时间检查。"
             exit 0
           fi
 
+          # 1) 如果手动输入了首次执行时间，则优先以它为准
+          if [ -n "${FIRST_RUN_AT:-}" ]; then
+            FIRST_TS=$(date -u -d "$FIRST_RUN_AT" +%s 2>/dev/null || true)
+
+            if [ -z "${FIRST_TS:-}" ]; then
+              echo "first_run_at 格式错误，请使用 UTC ISO 格式，例如 2026-05-16T00:00:00Z"
+              exit 1
+            fi
+
+            DIFF=$((NOW_TS - FIRST_TS))
+
+            echo "base_ts=$FIRST_TS" >> "$GITHUB_OUTPUT"
+            echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
+            echo "diff=$DIFF" >> "$GITHUB_OUTPUT"
+            echo "reason=first_run_at" >> "$GITHUB_OUTPUT"
+
+            if [ "$DIFF" -ge 0 ]; then
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "已到首次指定执行时间，允许执行。"
+            else
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "未到首次指定执行时间，跳过执行。"
+            fi
+            exit 0
+          fi
+
+          # 2) 如果没有状态文件，则默认允许首次执行
+          if [ ! -f "$STATE_FILE" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=no_state_file" >> "$GITHUB_OUTPUT"
+            echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
+            echo "未找到状态文件，按首次执行处理。"
+            exit 0
+          fi
+
+          # 3) 正常按上次成功执行时间 + 4 天判断
           LAST_TS=$(tr -d '\r\n' < "$STATE_FILE")
 
           if ! [[ "$LAST_TS" =~ ^[0-9]+$ ]]; then
@@ -53,25 +108,26 @@ jobs:
 
           DIFF=$((NOW_TS - LAST_TS))
 
-          echo "last_ts=$LAST_TS" >> "$GITHUB_OUTPUT"
+          echo "base_ts=$LAST_TS" >> "$GITHUB_OUTPUT"
           echo "now_ts=$NOW_TS" >> "$GITHUB_OUTPUT"
           echo "diff=$DIFF" >> "$GITHUB_OUTPUT"
+          echo "reason=last_success_plus_4_days" >> "$GITHUB_OUTPUT"
 
           if [ "$DIFF" -ge "$FOUR_DAYS" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "已满 4 天，继续执行。"
+            echo "距离上次成功执行已满 4 天，允许执行。"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "未满 4 天，跳过执行。"
+            echo "距离上次成功执行未满 4 天，跳过执行。"
           fi
 
-      - name: ℹ️ 输出跳过信息
-        if: steps.gate.outputs.should_run != 'true'
+      - name: ℹ️ 输出本次判断结果
         run: |
-          echo "本次仅检查，不执行续期。"
-          echo "last_ts=${{ steps.gate.outputs.last_ts }}"
-          echo "now_ts=${{ steps.gate.outputs.now_ts }}"
-          echo "diff=${{ steps.gate.outputs.diff }}"
+          echo "should_run = ${{ steps.gate.outputs.should_run }}"
+          echo "reason     = ${{ steps.gate.outputs.reason }}"
+          echo "base_ts    = ${{ steps.gate.outputs.base_ts }}"
+          echo "now_ts     = ${{ steps.gate.outputs.now_ts }}"
+          echo "diff       = ${{ steps.gate.outputs.diff }}"
 
       - name: 📥 拉取私库脚本
         if: steps.gate.outputs.should_run == 'true'
@@ -84,6 +140,7 @@ jobs:
       - name: 📂 移动脚本到工作目录
         if: steps.gate.outputs.should_run == 'true'
         run: |
+          set -euo pipefail
           mv private/action_renew.js action_renew.js
           mv private/package.json package.json
           [ -f private/package-lock.json ] && mv private/package-lock.json package-lock.json || true
@@ -146,7 +203,9 @@ jobs:
 
       - name: 📦 安装 Node.js 依赖
         if: steps.gate.outputs.should_run == 'true'
-        run: npm install
+        run: |
+          set -euo pipefail
+          npm install
 
       - name: 🚀 运行续期脚本
         if: steps.gate.outputs.should_run == 'true'
@@ -190,6 +249,7 @@ jobs:
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_number=${GITHUB_RUN_NUMBER}"
             echo "sha=${GITHUB_SHA}"
+            echo "gate_reason=${{ steps.gate.outputs.reason }}"
           } > output/last_success_meta.txt
 
       - name: ⏰ 提交状态文件
@@ -218,3 +278,46 @@ jobs:
           delete_workflow_pattern: ${{ github.workflow }}
           retain_days: 0
           keep_minimum_runs: 2
+
+      - name: 📘 更新 README 状态
+        if: steps.gate.outputs.should_run == 'true' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          META_FILE="output/last_success_meta.txt"
+          README_FILE="README.md"
+
+          LAST_SUCCESS_UNIX=$(grep '^last_success_unix=' "$META_FILE" | cut -d= -f2-)
+          LAST_SUCCESS_UTC=$(grep '^last_success_utc=' "$META_FILE" | cut -d= -f2-)
+          RUN_ID=$(grep '^run_id=' "$META_FILE" | cut -d= -f2-)
+          RUN_NUMBER=$(grep '^run_number=' "$META_FILE" | cut -d= -f2-)
+          SHA=$(grep '^sha=' "$META_FILE" | cut -d= -f2-)
+
+          SHORT_SHA="${SHA:0:7}"
+
+          cat > /tmp/auto-renew-status.md <<EOF
+          <!-- AUTO-RENEW-STATUS:START -->
+          - Last success UTC: \`${LAST_SUCCESS_UTC}\`
+          - Last success Unix: \`${LAST_SUCCESS_UNIX}\`
+          - Run ID: [\`${RUN_ID}\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID})
+          - Run Number: \`${RUN_NUMBER}\`
+          - Commit: [\`${SHORT_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})
+          <!-- AUTO-RENEW-STATUS:END -->
+          EOF
+
+          awk '
+            BEGIN {in_block=0}
+            /<!-- AUTO-RENEW-STATUS:START -->/ {
+              in_block=1
+              while ((getline line < "/tmp/auto-renew-status.md") > 0) print line
+              next
+            }
+            /<!-- AUTO-RENEW-STATUS:END -->/ {
+              in_block=0
+              next
+            }
+            !in_block {print}
+          ' "$README_FILE" > /tmp/README.md
+
+          mv /tmp/README.md "$README_FILE"
