@@ -1,4 +1,4 @@
-name: Auto Run
+name: Auto Renew
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       first_run_at:
-        description: '2026-05-13T00:21:00Z'
+        description: '首次执行时间，UTC 格式，例如 2026-05-16T00:00:00Z'
         required: false
         type: string
       force_run:
@@ -122,6 +122,7 @@ jobs:
           fi
 
       - name: ℹ️ 输出本次判断结果
+        shell: bash
         run: |
           echo "should_run = ${{ steps.gate.outputs.should_run }}"
           echo "reason     = ${{ steps.gate.outputs.reason }}"
@@ -139,6 +140,7 @@ jobs:
 
       - name: 📂 移动脚本到工作目录
         if: steps.gate.outputs.should_run == 'true'
+        shell: bash
         run: |
           set -euo pipefail
           mv private/action_renew.js action_renew.js
@@ -162,6 +164,7 @@ jobs:
         if: steps.gate.outputs.should_run == 'true'
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -193,6 +196,7 @@ jobs:
 
       - name: 🛠️ 安装系统依赖 & Chrome
         if: steps.gate.outputs.should_run == 'true'
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -203,6 +207,7 @@ jobs:
 
       - name: 📦 安装 Node.js 依赖
         if: steps.gate.outputs.should_run == 'true'
+        shell: bash
         run: |
           set -euo pipefail
           npm install
@@ -216,6 +221,7 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           CHROME_PATH: "/usr/bin/google-chrome"
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+        shell: bash
         run: |
           set -euo pipefail
           xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
@@ -237,6 +243,8 @@ jobs:
 
           NOW_TS=$(date -u +%s)
           NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NEXT_TS=$((NOW_TS + 4 * 24 * 60 * 60))
+          NEXT_ISO=$(date -u -d "@${NEXT_TS}" +"%Y-%m-%dT%H:%M:%SZ")
 
           mkdir -p .github/state
           mkdir -p output
@@ -246,26 +254,85 @@ jobs:
           {
             echo "last_success_unix=$NOW_TS"
             echo "last_success_utc=$NOW_ISO"
+            echo "next_eligible_unix=$NEXT_TS"
+            echo "next_eligible_utc=$NEXT_ISO"
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_number=${GITHUB_RUN_NUMBER}"
             echo "sha=${GITHUB_SHA}"
             echo "gate_reason=${{ steps.gate.outputs.reason }}"
           } > output/last_success_meta.txt
 
-      - name: ⏰ 提交状态文件
+      - name: 📘 更新 README 状态
         if: steps.gate.outputs.should_run == 'true' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          META_FILE="output/last_success_meta.txt"
+          README_FILE="README.md"
+
+          test -f "$META_FILE"
+          test -f "$README_FILE"
+
+          LAST_SUCCESS_UNIX=$(grep '^last_success_unix=' "$META_FILE" | cut -d= -f2-)
+          LAST_SUCCESS_UTC=$(grep '^last_success_utc=' "$META_FILE" | cut -d= -f2-)
+          NEXT_ELIGIBLE_UNIX=$(grep '^next_eligible_unix=' "$META_FILE" | cut -d= -f2-)
+          NEXT_ELIGIBLE_UTC=$(grep '^next_eligible_utc=' "$META_FILE" | cut -d= -f2-)
+          RUN_ID=$(grep '^run_id=' "$META_FILE" | cut -d= -f2-)
+          RUN_NUMBER=$(grep '^run_number=' "$META_FILE" | cut -d= -f2-)
+          SHA=$(grep '^sha=' "$META_FILE" | cut -d= -f2-)
+          GATE_REASON=$(grep '^gate_reason=' "$META_FILE" | cut -d= -f2-)
+
+          SHORT_SHA="${SHA:0:7}"
+
+          cat > /tmp/readme_status_block.md <<EOF
+          <!-- AUTO-RENEW-STATUS:START -->
+          - Last success UTC: \`${LAST_SUCCESS_UTC}\`
+          - Last success Unix: \`${LAST_SUCCESS_UNIX}\`
+          - Next eligible UTC: \`${NEXT_ELIGIBLE_UTC}\`
+          - Next eligible Unix: \`${NEXT_ELIGIBLE_UNIX}\`
+          - Run ID: [\`${RUN_ID}\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID})
+          - Run Number: \`${RUN_NUMBER}\`
+          - Commit: [\`${SHORT_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})
+          - Trigger reason: \`${GATE_REASON}\`
+          <!-- AUTO-RENEW-STATUS:END -->
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          readme = Path("README.md")
+          block = Path("/tmp/readme_status_block.md").read_text(encoding="utf-8").strip()
+          content = readme.read_text(encoding="utf-8")
+
+          pattern = re.compile(
+              r"<!-- AUTO-RENEW-STATUS:START -->.*?<!-- AUTO-RENEW-STATUS:END -->",
+              re.S,
+          )
+
+          if not pattern.search(content):
+              raise SystemExit("README.md 中没有找到 AUTO-RENEW-STATUS 标记区块")
+
+          content = pattern.sub(block, content)
+          readme.write_text(content + "\n", encoding="utf-8")
+          PY
+
+      - name: ⏰ 提交状态文件与 README
+        if: steps.gate.outputs.should_run == 'true' && success()
+        shell: bash
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .github/state/last_success_run.txt output/last_success_meta.txt
+          git add .github/state/last_success_run.txt output/last_success_meta.txt README.md
 
           if git diff --staged --quiet; then
             echo "无变化，跳过推送。"
           else
-            git commit -m "KeepAlive: update last successful run"
+            git commit -m "KeepAlive: update last successful run and README status"
             git push
           fi
 
@@ -278,46 +345,3 @@ jobs:
           delete_workflow_pattern: ${{ github.workflow }}
           retain_days: 0
           keep_minimum_runs: 2
-
-      - name: 📘 更新 README 状态
-        if: steps.gate.outputs.should_run == 'true' && success()
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          META_FILE="output/last_success_meta.txt"
-          README_FILE="README.md"
-
-          LAST_SUCCESS_UNIX=$(grep '^last_success_unix=' "$META_FILE" | cut -d= -f2-)
-          LAST_SUCCESS_UTC=$(grep '^last_success_utc=' "$META_FILE" | cut -d= -f2-)
-          RUN_ID=$(grep '^run_id=' "$META_FILE" | cut -d= -f2-)
-          RUN_NUMBER=$(grep '^run_number=' "$META_FILE" | cut -d= -f2-)
-          SHA=$(grep '^sha=' "$META_FILE" | cut -d= -f2-)
-
-          SHORT_SHA="${SHA:0:7}"
-
-          cat > /tmp/auto-run-status.md <<EOF
-          <!-- AUTO-RUN-STATUS:START -->
-          - Last success UTC: \`${LAST_SUCCESS_UTC}\`
-          - Last success Unix: \`${LAST_SUCCESS_UNIX}\`
-          - Run ID: [\`${RUN_ID}\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID})
-          - Run Number: \`${RUN_NUMBER}\`
-          - Commit: [\`${SHORT_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})
-          <!-- AUTO-RENEW-STATUS:END -->
-          EOF
-
-          awk '
-            BEGIN {in_block=0}
-            /<!-- AUTO-RUN-STATUS:START -->/ {
-              in_block=1
-              while ((getline line < "/tmp/auto-run-status.md") > 0) print line
-              next
-            }
-            /<!-- AUTO-RUN-STATUS:END -->/ {
-              in_block=0
-              next
-            }
-            !in_block {print}
-          ' "$README_FILE" > /tmp/README.md
-
-          mv /tmp/README.md "$README_FILE"
