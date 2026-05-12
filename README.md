@@ -1,7 +1,7 @@
-## Status
+## Auto Run Status
 
-![Status](https://github.com/vb197701/kata-re/actions/workflows/main.yml/badge.svg)
+![Auto Run](https://github.com/vb197701/kata-re/actions/workflows/main.yml/badge.svg)
 
-<!-- STATUS:START -->
+<!-- AUTO-RUN-STATUS:START -->
 等待下一次运行更新...
-<!-- STATUS:END -->
+<!-- AUTO-RUN-STATUS:END -->
