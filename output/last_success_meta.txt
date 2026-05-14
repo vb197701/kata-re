@@ -1,6 +1,0 @@
-last_success_unix=1778558428
-last_success_utc=2026-05-12T04:00:28Z
-run_id=25712463824
-run_number=46
-sha=977b6be42e2d00b64ca7c8fcedcad934131f49d0
-gate_reason=force_run
