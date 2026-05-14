@@ -1,7 +1,8 @@
-## Auto RENEW Status
+# Auto Run
 
-![Auto RENEW](https://github.com/vb197701/kata-re/actions/workflows/main.yml/badge.svg)
 
-<!-- AUTO-RENEW-STATUS:START -->
-等待下一次运行更新...
-<!-- AUTO-RENEW-STATUS:END -->
+
+## 运行状态
+
+<!-- AUTO-RENEW-STATUS -->
+<!-- /AUTO-RENEW-STATUS -->
