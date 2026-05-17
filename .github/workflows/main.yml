@@ -2,7 +2,7 @@ name: Auto Run
 
 on:
   schedule:
-    - cron: '11 0 * * *'   # 每天 UTC 00:11 自动检查
+    - cron: '11 1 * * *'   # 每天 UTC 01:11 自动检查
   workflow_dispatch:
     inputs:
       run_at:
