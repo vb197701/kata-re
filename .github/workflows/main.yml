@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       run_at:
-        description: '2026-05-20T00:18:00Z'
+        description: '2026-05-21T00:18:00Z'
         required: false
         type: string
 
@@ -35,8 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           NOW=$(date -u +%s)
-          FOUR_DAYS=$((4 * 24 * 60 * 60))
-          STATE="time.txt"
+          STATE="next_run.txt"
 
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             if [ -n "${RUN_AT:-}" ]; then
@@ -45,18 +44,13 @@ jobs:
                 echo "::error::run_at 格式错误，示例：2026-05-17T00:00:00Z"
                 exit 1
               fi
-              NEXT=$((BASE + FOUR_DAYS))
               echo "mode=official"   >> "$GITHUB_OUTPUT"
               echo "should_run=true" >> "$GITHUB_OUTPUT"
-              echo "base_ts=${BASE}" >> "$GITHUB_OUTPUT"
-              echo "next_ts=${NEXT}" >> "$GITHUB_OUTPUT"
-              echo "✅ [正式] 基准=$(date -u -d @${BASE} +%Y-%m-%dT%H:%M:%SZ) 下次=$(date -u -d @${NEXT} +%Y-%m-%dT%H:%M:%SZ)"
+              echo "✅ [正式模式] 指定时间=$(date -u -d @${BASE} +%Y-%m-%dT%H:%M:%SZ)，执行并记录。"
             else
               echo "mode=test"       >> "$GITHUB_OUTPUT"
               echo "should_run=true" >> "$GITHUB_OUTPUT"
-              echo "base_ts="        >> "$GITHUB_OUTPUT"
-              echo "next_ts="        >> "$GITHUB_OUTPUT"
-              echo "🧪 [测试] 直接执行，不写记录。"
+              echo "🧪 [测试模式] 立即执行，不提交记录。"
             fi
             exit 0
           fi
@@ -65,36 +59,35 @@ jobs:
 
           if [ ! -f "$STATE" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "⏭️  time.txt 不存在，跳过。请先手动正式执行一次以初始化。"
+            echo "⏭️  next_run.txt 不存在，跳过。请先手动正式执行一次以初始化。"
             exit 0
           fi
 
-          LAST=$(sed -n '1p' "$STATE" | tr -d '[:space:]')
-          NEXT=$( sed -n '2p' "$STATE" | tr -d '[:space:]')
+          NEXT_ISO=$(cat "$STATE" | tr -d "[:space:]")
+          NEXT=$(date -u -d "${NEXT_ISO}" +%s 2>/dev/null || true)
 
-          [ -z "$NEXT" ] && NEXT=$((LAST + FOUR_DAYS))
-
-          if ! [[ "$NEXT" =~ ^[0-9]+$ ]]; then
-            echo "::error::time.txt 格式异常: NEXT=${NEXT}"
+          if [ -z "${NEXT:-}" ]; then
+            echo "::error::next_run.txt 内容格式错误: ${NEXT_ISO}"
             exit 1
           fi
 
           DIFF=$((NOW - NEXT))
-          echo "next_ts=${NEXT}"  >> "$GITHUB_OUTPUT"
-          echo "base_ts=${NEXT}"  >> "$GITHUB_OUTPUT"   # 定时触发时，本轮基准 = 上轮记录的 next
-
-          echo "当前时间 : $(date -u -d @${NOW}  +%Y-%m-%dT%H:%M:%SZ)"
-          echo "下次应跑 : $(date -u -d @${NEXT} +%Y-%m-%dT%H:%M:%SZ)"
+          echo "下次运行 : ${NEXT_ISO}"
+          echo "当前时间 : $(date -u -d @${NOW} +%Y-%m-%dT%H:%M:%SZ)"
 
           if [ "$DIFF" -ge 0 ]; then
-            NEW_NEXT=$((NEXT + FOUR_DAYS))
-            echo "should_run=true"         >> "$GITHUB_OUTPUT"
-            echo "next_ts=${NEW_NEXT}"     >> "$GITHUB_OUTPUT"   # 覆盖：写入下下次
-            echo "✅ 时间已到，执行。下下次=$(date -u -d @${NEW_NEXT} +%Y-%m-%dT%H:%M:%SZ)"
+            echo "should_run=true"  >> "$GITHUB_OUTPUT"
+            echo "✅ 时间已到，允许执行。"
           else
-            echo "should_run=false"        >> "$GITHUB_OUTPUT"
-            echo "⏳ 未到时间，跳过。还差$(( -DIFF / 3600 ))小时。"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "⏳ 未到时间，跳过。还差$(( -DIFF / 3600 ))小时$(( (-DIFF % 3600) / 60 ))分钟。"
           fi
+
+      - name: ℹ️ 判断结果
+        shell: bash
+        run: |
+          echo "should_run = ${{ steps.gate.outputs.should_run }}"
+          echo "mode       = ${{ steps.gate.outputs.mode }}"
 
       - name: 📥 拉取私库脚本
         if: steps.gate.outputs.should_run == 'true'
@@ -183,31 +176,25 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: ⏰ 写入执行记录
+      - name: ⏰ 提交下次运行时间
         if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.mode != 'test'
         shell: bash
-        env:
-          BASE_TS: ${{ steps.gate.outputs.base_ts }}
-          NEXT_TS: ${{ steps.gate.outputs.next_ts }}
         run: |
           set -euo pipefail
-          NOW=$(date -u +%s)
-          NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          BASE_ISO=$(date -u -d "@${BASE_TS}" +"%Y-%m-%dT%H:%M:%SZ")
-          NEXT_ISO=$(date -u -d "@${NEXT_TS}" +"%Y-%m-%dT%H:%M:%SZ")
 
-          # time.txt：第1行=本次执行时间戳，第2行=下次应执行时间戳
-          printf '%s\n%s\n' "$NOW" "$NEXT_TS" > time.txt
+          if [ ! -f "next_run.txt" ]; then
+            echo "::error::action_renew.js 未生成 next_run.txt，请检查脚本是否已添加写入逻辑"
+            exit 1
+          fi
 
-          echo "本次执行 : ${NOW_ISO}"
-          echo "本轮基准 : ${BASE_ISO}"
-          echo "下次运行 : ${NEXT_ISO}"
+          NEXT_ISO=$(cat next_run.txt | tr -d "[:space:]")
+          echo "下次运行时间: ${NEXT_ISO}"
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add time.txt
+          git add next_run.txt
           if git diff --staged --quiet; then
-            echo "无变化，跳过推送。"
+            echo "next_run.txt 无变化，跳过推送。"
           else
             git commit -m "KeepAlive: next run at ${NEXT_ISO}"
             git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main
