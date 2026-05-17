@@ -1,15 +1,12 @@
-name: Auto Run
+name: Auto Renew
 
 on:
   schedule:
-    - cron: '11 0 * * *'   # 每天 UTC 00:11 检查一次
+    - cron: '11 0 * * *'   # 每天 UTC 00:11 自动检查
   workflow_dispatch:
     inputs:
-      scheduled_run_at:
-        description: |
-          【正式模式】指定下次计划执行的基准时间（UTC ISO 格式，例如 2026-05-20T00:00:00Z）。
-          填写后触发正式执行并以此时间为基准计算下次运行时间。
-          留空则为【测试模式】：立即执行续期脚本，但不写入任何状态记录。
+      run_at:
+        description: '2026-05-20T00:18:00Z'
         required: false
         type: string
 
@@ -28,131 +25,80 @@ jobs:
 
     steps:
       - name: 📥 拉取公库代码
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────────────────────
-      # GATE：判断是否需要执行
-      #
-      # 状态文件（.github/state/schedule.txt）格式：
-      #   第1行：上次正式执行的 Unix 时间戳
-      #   第2行：本周期基准时间的 Unix 时间戳（用于计算下次运行）
-      #
-      # 触发模式说明：
-      #
-      #   ① 手动触发（workflow_dispatch）
-      #      - 填写 scheduled_run_at → 【正式模式】立即执行，以该时间为基准写状态
-      #      - 留空              → 【测试模式】立即执行，不写任何状态记录
-      #
-      #   ② 定时触发（schedule）
-      #      - 读取状态文件的基准时间，判断 NOW >= base_ts + 4天 才执行
-      #      - 执行后以当时的 base_ts + 4天（即 next_ts）作为新基准更新状态文件
-      # ─────────────────────────────────────────────────────────────
-      - name: ⏱️ 判断是否需要执行
+      - name: ⏱️ 时间检查
         id: gate
         shell: bash
         env:
-          SCHEDULED_RUN_AT: ${{ github.event.inputs.scheduled_run_at }}
+          RUN_AT: ${{ github.event.inputs.run_at }}
         run: |
           set -euo pipefail
-
-          STATE_FILE=".github/state/schedule.txt"
-          NOW_TS=$(date -u +%s)
+          NOW=$(date -u +%s)
           FOUR_DAYS=$((4 * 24 * 60 * 60))
+          STATE="time.txt"
 
-          mkdir -p .github/state output
-
-          echo "event_name=${GITHUB_EVENT_NAME}"
-          echo "scheduled_run_at=${SCHEDULED_RUN_AT:-}"
-
-          # ── 手动触发 ──────────────────────────────────────────────
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-
-            if [ -n "${SCHEDULED_RUN_AT:-}" ]; then
-              # ── 正式模式：解析指定时间作为基准 ──
-              BASE_TS=$(date -u -d "${SCHEDULED_RUN_AT}" +%s 2>/dev/null || true)
-              if [ -z "${BASE_TS:-}" ]; then
-                echo "::error::scheduled_run_at 格式错误，请使用 UTC ISO 格式，例如 2026-05-20T00:00:00Z"
+            if [ -n "${RUN_AT:-}" ]; then
+              BASE=$(date -u -d "${RUN_AT}" +%s 2>/dev/null || true)
+              if [ -z "${BASE:-}" ]; then
+                echo "::error::run_at 格式错误，示例：2026-05-17T00:00:00Z"
                 exit 1
               fi
-              echo "should_run=true"          >> "$GITHUB_OUTPUT"
-              echo "write_state=true"         >> "$GITHUB_OUTPUT"
-              echo "base_ts=${BASE_TS}"       >> "$GITHUB_OUTPUT"
-              echo "now_ts=${NOW_TS}"         >> "$GITHUB_OUTPUT"
-              echo "reason=manual_scheduled"  >> "$GITHUB_OUTPUT"
-              echo "✅ [正式模式] 指定基准时间 = $(date -u -d @${BASE_TS} +%Y-%m-%dT%H:%M:%SZ)，执行并记录。"
+              NEXT=$((BASE + FOUR_DAYS))
+              echo "mode=official"   >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "base_ts=${BASE}" >> "$GITHUB_OUTPUT"
+              echo "next_ts=${NEXT}" >> "$GITHUB_OUTPUT"
+              echo "✅ [正式] 基准=$(date -u -d @${BASE} +%Y-%m-%dT%H:%M:%SZ) 下次=$(date -u -d @${NEXT} +%Y-%m-%dT%H:%M:%SZ)"
             else
-              # ── 测试模式：立即执行，不写状态 ──
-              echo "should_run=true"          >> "$GITHUB_OUTPUT"
-              echo "write_state=false"        >> "$GITHUB_OUTPUT"
-              echo "base_ts="                 >> "$GITHUB_OUTPUT"
-              echo "now_ts=${NOW_TS}"         >> "$GITHUB_OUTPUT"
-              echo "reason=manual_test"       >> "$GITHUB_OUTPUT"
-              echo "🧪 [测试模式] 立即执行，不写入状态记录。"
+              echo "mode=test"       >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "base_ts="        >> "$GITHUB_OUTPUT"
+              echo "next_ts="        >> "$GITHUB_OUTPUT"
+              echo "🧪 [测试] 直接执行，不写记录。"
             fi
             exit 0
           fi
 
-          # ── 定时触发 ──────────────────────────────────────────────
-          echo "write_state=true" >> "$GITHUB_OUTPUT"
+          echo "mode=schedule" >> "$GITHUB_OUTPUT"
 
-          if [ ! -f "$STATE_FILE" ]; then
-            echo "should_run=false"          >> "$GITHUB_OUTPUT"
-            echo "reason=no_state_file"      >> "$GITHUB_OUTPUT"
-            echo "now_ts=${NOW_TS}"          >> "$GITHUB_OUTPUT"
-            echo "⏭️  未找到状态文件，跳过执行。请先通过手动触发（填写 scheduled_run_at）完成首次正式运行以初始化状态。"
+          if [ ! -f "$STATE" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "⏭️  time.txt 不存在，跳过。请先手动正式执行一次以初始化。"
             exit 0
           fi
 
-          # 读取状态文件
-          LAST_RUN_TS=$(sed -n '1p' "$STATE_FILE" | tr -d '[:space:]')
-          BASE_TS=$(     sed -n '2p' "$STATE_FILE" | tr -d '[:space:]')
+          LAST=$(sed -n '1p' "$STATE" | tr -d '[:space:]')
+          NEXT=$( sed -n '2p' "$STATE" | tr -d '[:space:]')
 
-          # 兼容旧格式（只有1行）
-          if [ -z "${BASE_TS}" ]; then
-            BASE_TS=$LAST_RUN_TS
-          fi
+          [ -z "$NEXT" ] && NEXT=$((LAST + FOUR_DAYS))
 
-          if ! [[ "$BASE_TS" =~ ^[0-9]+$ ]]; then
-            echo "::error::状态文件格式错误: BASE_TS=${BASE_TS}"
+          if ! [[ "$NEXT" =~ ^[0-9]+$ ]]; then
+            echo "::error::time.txt 格式异常: NEXT=${NEXT}"
             exit 1
           fi
 
-          NEXT_TS=$((BASE_TS + FOUR_DAYS))
-          DIFF=$((NOW_TS - NEXT_TS))
+          DIFF=$((NOW - NEXT))
+          echo "next_ts=${NEXT}"  >> "$GITHUB_OUTPUT"
+          echo "base_ts=${NEXT}"  >> "$GITHUB_OUTPUT"   # 定时触发时，本轮基准 = 上轮记录的 next
 
-          echo "base_ts=${BASE_TS}"    >> "$GITHUB_OUTPUT"
-          echo "next_ts=${NEXT_TS}"    >> "$GITHUB_OUTPUT"
-          echo "now_ts=${NOW_TS}"      >> "$GITHUB_OUTPUT"
-
-          echo "基准时间 : $(date -u -d @${BASE_TS} +%Y-%m-%dT%H:%M:%SZ)"
-          echo "下次运行 : $(date -u -d @${NEXT_TS} +%Y-%m-%dT%H:%M:%SZ)"
-          echo "当前时间 : $(date -u -d @${NOW_TS}  +%Y-%m-%dT%H:%M:%SZ)"
+          echo "当前时间 : $(date -u -d @${NOW}  +%Y-%m-%dT%H:%M:%SZ)"
+          echo "下次应跑 : $(date -u -d @${NEXT} +%Y-%m-%dT%H:%M:%SZ)"
 
           if [ "$DIFF" -ge 0 ]; then
-            echo "should_run=true"                     >> "$GITHUB_OUTPUT"
-            echo "reason=scheduled_interval_reached"   >> "$GITHUB_OUTPUT"
-            echo "✅ 已到计划执行时间，允许执行。"
+            NEW_NEXT=$((NEXT + FOUR_DAYS))
+            echo "should_run=true"         >> "$GITHUB_OUTPUT"
+            echo "next_ts=${NEW_NEXT}"     >> "$GITHUB_OUTPUT"   # 覆盖：写入下下次
+            echo "✅ 时间已到，执行。下下次=$(date -u -d @${NEW_NEXT} +%Y-%m-%dT%H:%M:%SZ)"
           else
-            echo "should_run=false"                    >> "$GITHUB_OUTPUT"
-            echo "reason=scheduled_interval_not_yet"   >> "$GITHUB_OUTPUT"
-            echo "⏳ 未到计划执行时间，跳过（还差 $(( -DIFF / 3600 )) 小时）。"
+            echo "should_run=false"        >> "$GITHUB_OUTPUT"
+            echo "⏳ 未到时间，跳过。还差$(( -DIFF / 3600 ))小时。"
           fi
-
-      - name: ℹ️ 本次判断结果
-        shell: bash
-        run: |
-          echo "should_run  = ${{ steps.gate.outputs.should_run }}"
-          echo "write_state = ${{ steps.gate.outputs.write_state }}"
-          echo "reason      = ${{ steps.gate.outputs.reason }}"
-          echo "base_ts     = ${{ steps.gate.outputs.base_ts }}"
-          echo "now_ts      = ${{ steps.gate.outputs.now_ts }}"
-          echo "next_ts     = ${{ steps.gate.outputs.next_ts }}"
 
       - name: 📥 拉取私库脚本
         if: steps.gate.outputs.should_run == 'true'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO_NAME }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
@@ -160,9 +106,7 @@ jobs:
 
       - name: 📂 移动脚本到工作目录
         if: steps.gate.outputs.should_run == 'true'
-        shell: bash
         run: |
-          set -euo pipefail
           mv private/action_renew.js action_renew.js
           mv private/package.json package.json
           [ -f private/package-lock.json ] && mv private/package-lock.json package-lock.json || true
@@ -176,7 +120,7 @@ jobs:
 
       - name: 🐍 安装 Python
         if: steps.gate.outputs.should_run == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
@@ -184,28 +128,20 @@ jobs:
         if: steps.gate.outputs.should_run == 'true'
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
-        shell: bash
         run: |
-          set -euo pipefail
-
           if [ -z "${PROXY_URL:-}" ]; then
-            echo "PROXY_URL 未设置，跳过 sing-box 配置。"
+            echo "PROXY_URL 未设置，跳过。"
             exit 0
           fi
-
           echo "::add-mask::$PROXY_URL"
-
           SINGBOX_VER="1.11.0"
           wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
           tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
           mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
           chmod +x ./sing-box
-
           python proxy_handler.py > /dev/null 2>&1
-
           nohup ./sing-box run -c config.json > singbox.log 2>&1 &
           sleep 5
-
           EXIT_IP=$(curl -s --max-time 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>/dev/null || echo "")
           if [ -n "$EXIT_IP" ]; then
             echo "::add-mask::$EXIT_IP"
@@ -216,9 +152,7 @@ jobs:
 
       - name: 🛠️ 安装系统依赖 & Chrome
         if: steps.gate.outputs.should_run == 'true'
-        shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y xvfb
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
@@ -227,10 +161,7 @@ jobs:
 
       - name: 📦 安装 Node.js 依赖
         if: steps.gate.outputs.should_run == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm install
+        run: npm install
 
       - name: 🚀 运行续期脚本
         if: steps.gate.outputs.should_run == 'true'
@@ -241,10 +172,7 @@ jobs:
           PROXY_URL:         ${{ secrets.PROXY_URL }}
           CHROME_PATH:       "/usr/bin/google-chrome"
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
       - name: 📸 上传截图
         if: always()
@@ -255,130 +183,34 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 仅正式模式写入状态（write_state=true） ───────────────────
-      - name: 📝 写入执行时间记录
-        if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.write_state == 'true'
+      - name: ⏰ 写入执行记录
+        if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.mode != 'test'
         shell: bash
         env:
           BASE_TS: ${{ steps.gate.outputs.base_ts }}
           NEXT_TS: ${{ steps.gate.outputs.next_ts }}
         run: |
           set -euo pipefail
-
-          NOW_TS=$(date -u +%s)
+          NOW=$(date -u +%s)
           NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          FOUR_DAYS=$((4 * 24 * 60 * 60))
+          BASE_ISO=$(date -u -d "@${BASE_TS}" +"%Y-%m-%dT%H:%M:%SZ")
+          NEXT_ISO=$(date -u -d "@${NEXT_TS}" +"%Y-%m-%dT%H:%M:%SZ")
 
-          # 定时触发时 base_ts 来自状态文件，下轮基准 = 上轮 base_ts + 4天（即 next_ts）
-          # 正式手动触发时 base_ts 来自用户填写的 scheduled_run_at
-          # 两种情况统一：新基准 = base_ts + 4天（NEXT_TS 已由 gate 计算；
-          #               手动正式模式 gate 未输出 next_ts，这里补算）
-          if [ -n "${NEXT_TS:-}" ]; then
-            NEW_BASE_TS=$NEXT_TS
-          else
-            NEW_BASE_TS=$((BASE_TS + FOUR_DAYS))
-          fi
-
-          NEW_BASE_ISO=$(date -u -d "@${NEW_BASE_TS}" +"%Y-%m-%dT%H:%M:%SZ")
-          BASE_ISO=$(     date -u -d "@${BASE_TS}"     +"%Y-%m-%dT%H:%M:%SZ")
-
-          mkdir -p .github/state output
-
-          # 状态文件：第1行=本次执行时间戳，第2行=下轮基准时间戳
-          printf '%s\n%s\n' "$NOW_TS" "$NEW_BASE_TS" > .github/state/schedule.txt
-
-          # 元数据文件
-          {
-            echo "run_ts=${NOW_TS}"
-            echo "run_utc=${NOW_ISO}"
-            echo "this_base_ts=${BASE_TS}"
-            echo "this_base_utc=${BASE_ISO}"
-            echo "next_base_ts=${NEW_BASE_TS}"
-            echo "next_base_utc=${NEW_BASE_ISO}"
-            echo "run_id=${GITHUB_RUN_ID}"
-            echo "run_number=${GITHUB_RUN_NUMBER}"
-            echo "sha=${GITHUB_SHA}"
-            echo "gate_reason=${{ steps.gate.outputs.reason }}"
-            echo "job_result=${{ job.status }}"
-          } > output/last_run_meta.txt
+          # time.txt：第1行=本次执行时间戳，第2行=下次应执行时间戳
+          printf '%s\n%s\n' "$NOW" "$NEXT_TS" > time.txt
 
           echo "本次执行 : ${NOW_ISO}"
           echo "本轮基准 : ${BASE_ISO}"
-          echo "下轮基准 : ${NEW_BASE_ISO}"
+          echo "下次运行 : ${NEXT_ISO}"
 
-      - name: 📘 更新 README 状态
-        if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.write_state == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          META_FILE="output/last_run_meta.txt"
-          README_FILE="README.md"
-
-          test -f "$META_FILE"
-          test -f "$README_FILE"
-
-          RUN_UTC=$(       grep '^run_utc='       "$META_FILE" | cut -d= -f2-)
-          RUN_TS=$(        grep '^run_ts='        "$META_FILE" | cut -d= -f2-)
-          THIS_BASE_UTC=$( grep '^this_base_utc=' "$META_FILE" | cut -d= -f2-)
-          NEXT_BASE_UTC=$( grep '^next_base_utc=' "$META_FILE" | cut -d= -f2-)
-          NEXT_BASE_TS=$(  grep '^next_base_ts='  "$META_FILE" | cut -d= -f2-)
-          RUN_ID=$(        grep '^run_id='        "$META_FILE" | cut -d= -f2-)
-          RUN_NUMBER=$(    grep '^run_number='    "$META_FILE" | cut -d= -f2-)
-          SHA=$(           grep '^sha='           "$META_FILE" | cut -d= -f2-)
-          GATE_REASON=$(   grep '^gate_reason='   "$META_FILE" | cut -d= -f2-)
-          JOB_RESULT=$(    grep '^job_result='    "$META_FILE" | cut -d= -f2-)
-          SHORT_SHA="${SHA:0:7}"
-
-          cat > /tmp/readme_status_block.md <<EOF
-          - Last run UTC: \`${RUN_UTC}\`
-          - Last run Unix: \`${RUN_TS}\`
-          - This cycle base UTC: \`${THIS_BASE_UTC}\`
-          - Next cycle base UTC: \`${NEXT_BASE_UTC}\`
-          - Next cycle base Unix: \`${NEXT_BASE_TS}\`
-          - Run ID: [\`${RUN_ID}\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID})
-          - Run Number: \`${RUN_NUMBER}\`
-          - Commit: [\`${SHORT_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})
-          - Trigger reason: \`${GATE_REASON}\`
-          - Job result: \`${JOB_RESULT}\`
-          EOF
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          readme = Path("README.md")
-          block  = Path("/tmp/readme_status_block.md").read_text(encoding="utf-8").strip()
-          content = readme.read_text(encoding="utf-8")
-
-          pattern = re.compile(
-              r"<!-- AUTO-RENEW-STATUS -->.*?<!-- /AUTO-RENEW-STATUS -->",
-              re.S,
-          )
-          replacement = f"<!-- AUTO-RENEW-STATUS -->\n{block}\n<!-- /AUTO-RENEW-STATUS -->"
-
-          if not pattern.search(content):
-              raise SystemExit("README.md 中没有找到 AUTO-RENEW-STATUS 标记区块")
-
-          content = pattern.sub(replacement, content)
-          readme.write_text(content + "\n", encoding="utf-8")
-          PY
-
-      - name: ⏰ 提交状态文件与 README
-        if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.write_state == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add .github/state/schedule.txt output/last_run_meta.txt README.md
-
+          git add time.txt
           if git diff --staged --quiet; then
             echo "无变化，跳过推送。"
           else
-            git commit -m "KeepAlive: update run record and README status"
-            git push
+            git commit -m "KeepAlive: next run at ${NEXT_ISO}"
+            git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main
           fi
 
       - name: 🧹 清理历史运行记录
